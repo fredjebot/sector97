@@ -8,8 +8,11 @@ namespace VoicePrototype;
 class Program
 {
     private static readonly HttpClient _httpClient = new();
-    private static string? _anthropicApiKey;
-    private static List<Message> _conversationHistory = new();
+    private static List<ChatMessage> _conversationHistory = new();
+    
+    // Clawdbot Gateway settings
+    private const string ClawdbotUrl = "http://127.0.0.1:18789/v1/chat/completions";
+    private const string ClawdbotToken = "36dca5a3847f032b4f46b023343372811d5ff1c16eca5f9b";
     
     private const string SystemPrompt = """
         You are a helpful assistant for a meeting debrief conversation.
@@ -34,21 +37,7 @@ class Program
         Console.WriteLine("║           Sector97 Voice Prototype - Meeting Debrief         ║");
         Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
         Console.WriteLine();
-        
-        // Get API key
-        _anthropicApiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
-        if (string.IsNullOrEmpty(_anthropicApiKey))
-        {
-            Console.Write("Enter your Anthropic API key: ");
-            _anthropicApiKey = Console.ReadLine()?.Trim();
-        }
-        
-        if (string.IsNullOrEmpty(_anthropicApiKey))
-        {
-            Console.WriteLine("Error: API key required");
-            return;
-        }
-
+        Console.WriteLine("Powered by Clawdbot 🤖");
         Console.WriteLine();
         Console.WriteLine("Instructions:");
         Console.WriteLine("  • Press ENTER to start recording");
@@ -56,6 +45,9 @@ class Program
         Console.WriteLine("  • Press ENTER again to stop and process");
         Console.WriteLine("  • Type 'quit' to exit, 'summary' for final notes");
         Console.WriteLine();
+        
+        // Add system message
+        _conversationHistory.Add(new ChatMessage { Role = "system", Content = SystemPrompt });
         
         // Initial greeting
         var greeting = "Hi! I'm ready to help capture your meeting notes. When you're ready, just tell me who you met with and we'll go from there.";
@@ -96,9 +88,9 @@ class Program
             Console.WriteLine($"🎤 You said: {transcription}");
             Console.WriteLine();
             
-            // Get Claude response
+            // Get response via Clawdbot
             Console.WriteLine("🤔 Thinking...");
-            var response = await GetClaudeResponseAsync(transcription);
+            var response = await GetResponseAsync(transcription);
             if (string.IsNullOrEmpty(response))
             {
                 Console.WriteLine("Error getting response. Try again.");
@@ -189,25 +181,24 @@ class Program
         return null;
     }
 
-    static async Task<string?> GetClaudeResponseAsync(string userMessage)
+    static async Task<string?> GetResponseAsync(string userMessage)
     {
-        _conversationHistory.Add(new Message { Role = "user", Content = userMessage });
+        _conversationHistory.Add(new ChatMessage { Role = "user", Content = userMessage });
         
         var requestBody = new
         {
-            model = "claude-sonnet-4-20250514",
-            max_tokens = 300,
-            system = SystemPrompt,
-            messages = _conversationHistory
+            model = "clawdbot",
+            messages = _conversationHistory,
+            max_tokens = 300
         };
         
-        var request = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages")
+        var request = new HttpRequestMessage(HttpMethod.Post, ClawdbotUrl)
         {
             Content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json")
         };
         
-        request.Headers.Add("x-api-key", _anthropicApiKey);
-        request.Headers.Add("anthropic-version", "2023-06-01");
+        request.Headers.Add("Authorization", $"Bearer {ClawdbotToken}");
+        request.Headers.Add("x-clawdbot-agent-id", "main");
         
         try
         {
@@ -216,14 +207,14 @@ class Program
             
             if (!response.IsSuccessStatusCode)
             {
-                Console.WriteLine($"API Error: {responseBody}");
+                Console.WriteLine($"API Error ({response.StatusCode}): {responseBody}");
                 return null;
             }
             
-            var result = JsonSerializer.Deserialize<ClaudeResponse>(responseBody);
-            var assistantMessage = result?.Content?.FirstOrDefault()?.Text ?? "";
+            var result = JsonSerializer.Deserialize<OpenAIResponse>(responseBody);
+            var assistantMessage = result?.Choices?.FirstOrDefault()?.Message?.Content ?? "";
             
-            _conversationHistory.Add(new Message { Role = "assistant", Content = assistantMessage });
+            _conversationHistory.Add(new ChatMessage { Role = "assistant", Content = assistantMessage });
             
             return assistantMessage;
         }
@@ -238,51 +229,38 @@ class Program
     {
         Console.WriteLine("\n📋 Generating meeting summary...\n");
         
-        _conversationHistory.Add(new Message 
-        { 
-            Role = "user", 
-            Content = "Please provide a structured summary of our meeting notes in markdown format with sections for: Meeting Details, Key Discussion Points, Decisions Made, Action Items, and Follow-ups needed." 
-        });
+        var summaryRequest = "Please provide a structured summary of our meeting notes in markdown format with sections for: Meeting Details, Key Discussion Points, Decisions Made, Action Items, and Follow-ups needed.";
         
-        var requestBody = new
+        var response = await GetResponseAsync(summaryRequest);
+        
+        if (!string.IsNullOrEmpty(response))
         {
-            model = "claude-sonnet-4-20250514",
-            max_tokens = 1000,
-            system = SystemPrompt,
-            messages = _conversationHistory
-        };
-        
-        var request = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages")
-        {
-            Content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json")
-        };
-        
-        request.Headers.Add("x-api-key", _anthropicApiKey);
-        request.Headers.Add("anthropic-version", "2023-06-01");
-        
-        var response = await _httpClient.SendAsync(request);
-        var responseBody = await response.Content.ReadAsStringAsync();
-        var result = JsonSerializer.Deserialize<ClaudeResponse>(responseBody);
-        var summary = result?.Content?.FirstOrDefault()?.Text ?? "Could not generate summary";
-        
-        Console.WriteLine("═══════════════════════════════════════════════════════════════");
-        Console.WriteLine(summary);
-        Console.WriteLine("═══════════════════════════════════════════════════════════════");
-        
-        // Save to file
-        var fileName = $"meeting_notes_{DateTime.Now:yyyy-MM-dd_HHmmss}.md";
-        await File.WriteAllTextAsync(fileName, summary);
-        Console.WriteLine($"\n💾 Saved to: {fileName}");
+            Console.WriteLine("═══════════════════════════════════════════════════════════════");
+            Console.WriteLine(response);
+            Console.WriteLine("═══════════════════════════════════════════════════════════════");
+            
+            // Save to file
+            var fileName = $"meeting_notes_{DateTime.Now:yyyy-MM-dd_HHmmss}.md";
+            await File.WriteAllTextAsync(fileName, response);
+            Console.WriteLine($"\n💾 Saved to: {fileName}");
+        }
     }
 
     static async Task SpeakAsync(string text)
     {
+        // Escape quotes and remove markdown that sounds weird when spoken
+        var cleanText = text
+            .Replace("\"", "\\\"")
+            .Replace("#", "")
+            .Replace("*", "")
+            .Replace("_", "");
+            
         var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = "say",
-                Arguments = $"-v Samantha \"{text.Replace("\"", "\\\"")}\"",
+                Arguments = $"-v Samantha \"{cleanText}\"",
                 UseShellExecute = false,
                 CreateNoWindow = true
             }
@@ -293,7 +271,7 @@ class Program
     }
 }
 
-class Message
+class ChatMessage
 {
     [JsonPropertyName("role")]
     public string Role { get; set; } = "";
@@ -302,14 +280,14 @@ class Message
     public string Content { get; set; } = "";
 }
 
-class ClaudeResponse
+class OpenAIResponse
 {
-    [JsonPropertyName("content")]
-    public List<ContentBlock>? Content { get; set; }
+    [JsonPropertyName("choices")]
+    public List<Choice>? Choices { get; set; }
 }
 
-class ContentBlock
+class Choice
 {
-    [JsonPropertyName("text")]
-    public string? Text { get; set; }
+    [JsonPropertyName("message")]
+    public ChatMessage? Message { get; set; }
 }
